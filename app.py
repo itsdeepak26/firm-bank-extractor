@@ -1,8 +1,20 @@
-# --- 2. Universal Mapping Logic (UPDATED WITH SAFETY NET) ---
+import streamlit as st
+import pdfplumber
+import pandas as pd
+from io import BytesIO
+import traceback
+
+# --- 1. Website Interface Setup ---
+st.set_page_config(page_title="Firm Bank Statement Extractor", layout="centered")
+st.title("🏦 Universal Bank Statement Extractor")
+st.markdown("Upload any bank statement PDF. The system will standardize it into a 6-column Excel format.")
+
+# --- 2. Universal Mapping Logic (With Safety Net) ---
 def process_pdf(uploaded_file):
-    try: # <--- We added a TRY block
+    try:
         all_rows = []
         
+        # Dictionary to catch various bank column names
         column_mapping = {
             'txn date': 'Date', 'transaction date': 'Date', 'date': 'Date', 'value date': 'Date',
             'narration': 'Narration', 'particulars': 'Narration', 'description': 'Narration', 'details': 'Narration',
@@ -12,6 +24,7 @@ def process_pdf(uploaded_file):
             'balance': 'Balance', 'closing balance': 'Balance'
         }
 
+        # Attempt to read the PDF
         with pdfplumber.open(uploaded_file) as pdf:
             for page in pdf.pages:
                 tables = page.extract_tables()
@@ -21,10 +34,11 @@ def process_pdf(uploaded_file):
                         all_rows.extend(cleaned_table)
         
         if not all_rows:
-            return None, "No tabular data found in this PDF. Is it a scanned image?"
+            return None, "No tables found. Is this PDF a scanned picture instead of text, or is it password protected?"
 
         df = pd.DataFrame(all_rows)
         
+        # Find the header row
         header_idx = -1
         for i, row in df.iterrows():
             row_text = ' '.join([str(val).lower() for val in row.values])
@@ -36,6 +50,7 @@ def process_pdf(uploaded_file):
             df.columns = df.iloc[header_idx]
             df = df.iloc[header_idx+1:].reset_index(drop=True)
             
+            # Apply the mapping
             new_columns = []
             for col in df.columns:
                 col_lower = str(col).lower().strip()
@@ -49,6 +64,8 @@ def process_pdf(uploaded_file):
                     new_columns.append('Ignore')
             
             df.columns = new_columns
+            
+            # Filter to exact requested format
             standard_cols = ['Date', 'Narration', 'Cheque No/Other', 'Withdrawal', 'Deposit', 'Balance']
             
             for col in standard_cols:
@@ -61,8 +78,40 @@ def process_pdf(uploaded_file):
             
             return final_df, "Success"
         else:
-            return None, "Could not identify the header row (Date, Narration, etc.) in this format."
+            return None, "Could not identify the Date/Narration headers in this format."
 
     except Exception as e:
-        # <--- If ANYTHING fails, it stops the spinner and reports the error here
-        return None, f"System Error crashed the app: {str(e)}"
+        # If it crashes, catch the exact error and send it to the website
+        error_details = traceback.format_exc()
+        return None, f"System Error: {str(e)}\n\nDetails:\n{error_details}"
+
+# --- 3. Upload & Run Interface ---
+uploaded_file = st.file_uploader("Drop PDF Statement Here", type=["pdf"])
+
+if uploaded_file is not None:
+    if st.button("Extract Data to Excel"):
+        with st.spinner("Reading PDF... please wait."):
+            
+            # Run the process
+            final_df, status = process_pdf(uploaded_file)
+            
+            # Check results
+            if final_df is not None:
+                st.success("Extraction Complete! Data standardized.")
+                st.dataframe(final_df.head(10)) 
+                
+                output = BytesIO()
+                with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                    final_df.to_excel(writer, index=False, sheet_name='Standard_Data')
+                processed_data = output.getvalue()
+                
+                st.download_button(
+                    label="📥 Download Standardized Excel",
+                    data=processed_data,
+                    file_name="Standardized_Bank_Data.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+            else:
+                # This is where the safety net prints the red text instead of spinning forever
+                st.error("Extraction Failed!")
+                st.error(status)
