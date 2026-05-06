@@ -1,0 +1,108 @@
+import streamlit as st
+import pdfplumber
+import pandas as pd
+from io import BytesIO
+
+# --- 1. Website Interface Setup ---
+st.set_page_config(page_title="Firm Bank Statement Extractor", layout="centered")
+st.title("🏦 Universal Bank Statement to Excel")
+st.markdown("Upload any bank statement PDF. The system will extract the tables and standardize them into a 6-column Excel format.")
+
+# --- 2. Universal Mapping Logic ---
+def process_pdf(uploaded_file):
+    all_rows = []
+    
+    # Dictionary to catch various bank column names
+    column_mapping = {
+        'txn date': 'Date', 'transaction date': 'Date', 'date': 'Date', 'value date': 'Date',
+        'narration': 'Narration', 'particulars': 'Narration', 'description': 'Narration', 'details': 'Narration',
+        'chq no': 'Cheque No/Other', 'cheque number': 'Cheque No/Other', 'ref no': 'Cheque No/Other', 'reference': 'Cheque No/Other',
+        'withdrawal': 'Withdrawal', 'dr': 'Withdrawal', 'debit': 'Withdrawal', 'debits': 'Withdrawal',
+        'deposit': 'Deposit', 'cr': 'Deposit', 'credit': 'Deposit', 'credits': 'Deposit',
+        'balance': 'Balance', 'closing balance': 'Balance'
+    }
+
+    with pdfplumber.open(uploaded_file) as pdf:
+        for page in pdf.pages:
+            tables = page.extract_tables()
+            for table in tables:
+                if table:
+                    cleaned_table = [[str(cell).replace('\n', ' ').strip() if cell else '' for cell in row] for row in table]
+                    all_rows.extend(cleaned_table)
+    
+    if not all_rows:
+        return None, "No tabular data found."
+
+    df = pd.DataFrame(all_rows)
+    
+    # Find the header row
+    header_idx = -1
+    for i, row in df.iterrows():
+        row_text = ' '.join([str(val).lower() for val in row.values])
+        if 'date' in row_text or 'particular' in row_text or 'narration' in row_text:
+            header_idx = i
+            break
+            
+    if header_idx != -1:
+        df.columns = df.iloc[header_idx]
+        df = df.iloc[header_idx+1:].reset_index(drop=True)
+        
+        # Apply the mapping
+        new_columns = []
+        for col in df.columns:
+            col_lower = str(col).lower().strip()
+            matched = False
+            for key, std_name in column_mapping.items():
+                if key in col_lower:
+                    new_columns.append(std_name)
+                    matched = True
+                    break
+            if not matched:
+                new_columns.append('Ignore')
+        
+        df.columns = new_columns
+        
+        # Filter to exact requested format
+        standard_cols = ['Date', 'Narration', 'Cheque No/Other', 'Withdrawal', 'Deposit', 'Balance']
+        
+        # Ensure all columns exist even if empty
+        for col in standard_cols:
+            if col not in df.columns:
+                df[col] = ''
+                
+        final_df = df[standard_cols].copy()
+        
+        # Clean empty rows and repeating headers
+        final_df = final_df.dropna(how='all')
+        final_df = final_df[~final_df['Date'].astype(str).str.contains('Date', na=False, case=False)]
+        
+        return final_df, "Success"
+    else:
+        return None, "Could not identify headers in this format."
+
+# --- 3. Upload & Run Interface ---
+uploaded_file = st.file_uploader("Drop PDF Statement Here", type=["pdf"])
+
+if uploaded_file is not None:
+    if st.button("Extract & Standardize Data"):
+        with st.spinner("Processing PDF..."):
+            final_df, status = process_pdf(uploaded_file)
+            
+            if final_df is not None:
+                st.success("Extraction Complete! Data standardized.")
+                st.dataframe(final_df.head(10)) # Show preview
+                
+                # Convert to Excel memory file for download
+                output = BytesIO()
+                with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                    final_df.to_excel(writer, index=False, sheet_name='Standard_Data')
+                processed_data = output.getvalue()
+                
+                st.download_button(
+                    label="📥 Download Standardized Excel",
+                    data=processed_data,
+                    file_name="Standardized_Bank_Data.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
+            else:
+                st.error(status)
